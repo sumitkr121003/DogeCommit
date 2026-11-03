@@ -439,6 +439,15 @@ describe("DogeCommitEscrow", function () {
       ).to.be.revertedWithCustomError(escrow, "InvalidMilestoneState");
     });
 
+    it("should revert if client attempts to approve an already approved milestone (double approval)", async function () {
+      await escrow.connect(contributor).submitMilestone(projectId, 0, "url0", "hash0");
+      await escrow.connect(client).approveMilestone(projectId, 0);
+
+      await expect(
+        escrow.connect(client).approveMilestone(projectId, 0)
+      ).to.be.revertedWithCustomError(escrow, "InvalidMilestoneState");
+    });
+
     it("should revert if non-client attempts to approve", async function () {
       await escrow.connect(contributor).submitMilestone(projectId, 0, "url", "hash");
       await expect(
@@ -524,6 +533,14 @@ describe("DogeCommitEscrow", function () {
     it("should revert if client tries to dispute an unsubmitted milestone", async function () {
       await expect(
         escrow.connect(client).disputeMilestone(projectId, 1, "Not submitted yet")
+      ).to.be.revertedWithCustomError(escrow, "InvalidMilestoneState");
+    });
+
+    it("should revert if client attempts to dispute an already approved milestone", async function () {
+      await escrow.connect(client).approveMilestone(projectId, 0);
+
+      await expect(
+        escrow.connect(client).disputeMilestone(projectId, 0, "Disputing approved work")
       ).to.be.revertedWithCustomError(escrow, "InvalidMilestoneState");
     });
 
@@ -750,6 +767,30 @@ describe("DogeCommitEscrow", function () {
         escrow.connect(client).createProject(
           contributor.address,
           "Too Many Milestones",
+          "Should be rejected",
+          milestones
+        )
+      ).to.be.revertedWithCustomError(escrow, "TooManyMilestones");
+    });
+
+    it("should revert creating a project with 30 milestones (TooManyMilestones)", async function () {
+      const milestones = buildMilestones(30, futureDeadline);
+      await expect(
+        escrow.connect(client).createProject(
+          contributor.address,
+          "30 Milestones",
+          "Should be rejected",
+          milestones
+        )
+      ).to.be.revertedWithCustomError(escrow, "TooManyMilestones");
+    });
+
+    it("should revert creating a project with 50 milestones (TooManyMilestones)", async function () {
+      const milestones = buildMilestones(50, futureDeadline);
+      await expect(
+        escrow.connect(client).createProject(
+          contributor.address,
+          "50 Milestones",
           "Should be rejected",
           milestones
         )
