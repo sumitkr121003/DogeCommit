@@ -78,6 +78,11 @@ contract DogeCommitEscrow is ReentrancyGuard {
         uint256 milestoneCount;
     }
 
+    // --- Constants ---
+
+    /// @notice Maximum number of milestones per project.
+    uint256 public constant MAX_MILESTONES = 25;
+
     // --- State Variables ---
 
     /// @notice The DOGE token ERC-20 contract (0x530000000000000000000000000000000000d09e on DogeOS)
@@ -174,6 +179,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     error InvalidContributorAddress();
     error ClientEqualsContributor();
     error EmptyMilestones();
+    error TooManyMilestones();
     error InvalidMilestoneAmount();
     error InvalidMilestoneDeadline();
     error ProjectDoesNotExist();
@@ -238,6 +244,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
         if (contributor == address(0)) revert InvalidContributorAddress();
         if (msg.sender == contributor) revert ClientEqualsContributor();
         if (milestones.length == 0) revert EmptyMilestones();
+        if (milestones.length > MAX_MILESTONES) revert TooManyMilestones();
 
         projectId = ++projectCount;
         uint256 totalAmount = 0;

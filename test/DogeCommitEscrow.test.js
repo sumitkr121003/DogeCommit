@@ -721,4 +721,131 @@ describe("DogeCommitEscrow", function () {
       );
     });
   });
+
+  describe("Milestone Count Boundaries (MAX_MILESTONES = 25)", function () {
+    let futureDeadline;
+
+    // Builds an array of n identical milestone inputs
+    function buildMilestones(n, deadline) {
+      return Array.from({ length: n }, (_, i) => ({
+        name: `Milestone ${i + 1}`,
+        description: `Description for milestone ${i + 1}`,
+        amount: ONE_DOGE,
+        deadline,
+        deliverableRequirements: `Deliverable for milestone ${i + 1}`,
+      }));
+    }
+
+    beforeEach(async function () {
+      futureDeadline = (await time.latest()) + 86400 * 30; // 30 days out
+    });
+
+    it("should expose MAX_MILESTONES constant as 25", async function () {
+      expect(await escrow.MAX_MILESTONES()).to.equal(25);
+    });
+
+    it("should revert creating a project with 26 milestones (TooManyMilestones)", async function () {
+      const milestones = buildMilestones(26, futureDeadline);
+      await expect(
+        escrow.connect(client).createProject(
+          contributor.address,
+          "Too Many Milestones",
+          "Should be rejected",
+          milestones
+        )
+      ).to.be.revertedWithCustomError(escrow, "TooManyMilestones");
+    });
+
+    it("should allow creating a project with exactly 25 milestones", async function () {
+      const milestones = buildMilestones(25, futureDeadline);
+      const totalAmount = ONE_DOGE * 25n;
+
+      const tx = await escrow.connect(client).createProject(
+        contributor.address,
+        "Max Milestones Project",
+        "25-milestone boundary test",
+        milestones
+      );
+
+      await expect(tx)
+        .to.emit(escrow, "ProjectCreated")
+        .withArgs(1, client.address, contributor.address, "Max Milestones Project", totalAmount, 25);
+
+      const project = await escrow.getProject(1);
+      expect(project.milestoneCount).to.equal(25);
+    });
+
+    it("should retrieve all 25 milestones via getMilestones()", async function () {
+      const milestones = buildMilestones(25, futureDeadline);
+      await escrow.connect(client).createProject(
+        contributor.address,
+        "Max Milestones Project",
+        "Retrieve all milestones",
+        milestones
+      );
+
+      const retrieved = await escrow.getMilestones(1);
+      expect(retrieved.length).to.equal(25);
+
+      for (let i = 0; i < 25; i++) {
+        expect(retrieved[i].name).to.equal(`Milestone ${i + 1}`);
+        expect(retrieved[i].amount).to.equal(ONE_DOGE);
+      }
+    });
+
+    it("should correctly complete a 25-milestone project", async function () {
+      const milestones = buildMilestones(25, futureDeadline);
+      const totalAmount = ONE_DOGE * 25n;
+
+      // Create project
+      await escrow.connect(client).createProject(
+        contributor.address,
+        "Max Milestones Project",
+        "Full lifecycle with 25 milestones",
+        milestones
+      );
+
+      // Fund and accept
+      await dogeToken.connect(client).approve(await escrow.getAddress(), totalAmount);
+      await escrow.connect(client).fundProject(1);
+      await escrow.connect(contributor).acceptProject(1);
+
+      // Track contributor balance before approvals
+      const balanceBefore = await dogeToken.balanceOf(contributor.address);
+
+      // Submit and approve all 25 milestones
+      for (let i = 0; i < 25; i++) {
+        await escrow.connect(contributor).submitMilestone(
+          1,
+          i,
+          `https://evidence.example.com/milestone-${i + 1}`,
+          `hash_milestone_${i + 1}`
+        );
+        await escrow.connect(client).approveMilestone(1, i);
+      }
+
+      // Verify final project status
+      const project = await escrow.getProject(1);
+      expect(project.status).to.equal(2); // Completed (enum index 2: Created=0, Active=1, Completed=2, Cancelled=3)
+      expect(project.releasedAmount).to.equal(totalAmount);
+
+      // Verify contributor received all funds
+      const balanceAfter = await dogeToken.balanceOf(contributor.address);
+      expect(balanceAfter - balanceBefore).to.equal(totalAmount);
+    });
+
+    it("should measure gas for 25-milestone project creation (informational)", async function () {
+      const milestones = buildMilestones(25, futureDeadline);
+      const tx = await escrow.connect(client).createProject(
+        contributor.address,
+        "Gas Measurement Project",
+        "Gas test for 25 milestones",
+        milestones
+      );
+      const receipt = await tx.wait();
+      console.log(`    ⛽  createProject(25 milestones) gas used: ${receipt.gasUsed.toString()}`);
+      // Informational only -- no assertion; just ensure the tx succeeds
+      expect(receipt.status).to.equal(1);
+    });
+  });
 });
