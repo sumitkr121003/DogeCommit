@@ -565,7 +565,7 @@ describe("DogeCommitEscrow", function () {
       expect(await dogeToken.balanceOf(client.address)).to.equal(clientBalanceBefore + FIFTY_DOGE);
 
       const milestone = await escrow.getMilestone(projectId, 0);
-      expect(milestone.status).to.equal(4); // MilestoneStatus.Resolved
+      expect(milestone.status).to.equal(5); // MilestoneStatus.ResolvedRefunded
 
       const project = await escrow.getProject(projectId);
       expect(project.refundedAmount).to.equal(FIFTY_DOGE);
@@ -597,6 +597,9 @@ describe("DogeCommitEscrow", function () {
       expect(await dogeToken.balanceOf(contributor.address)).to.equal(
         contributorBalanceBefore + FIFTY_DOGE
       );
+
+      const milestone = await escrow.getMilestone(projectId, 0);
+      expect(milestone.status).to.equal(4); // MilestoneStatus.ResolvedReleased
 
       const project = await escrow.getProject(projectId);
       expect(project.releasedAmount).to.equal(FIFTY_DOGE);

@@ -10,6 +10,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  * @notice DOGE-native milestone escrow contract for DogeOS Chikyū Testnet.
  *         Enforces transparent milestone-based escrow payments between clients
  *         and independent contributors using DOGE ERC-20 interface.
+ *         Conforms strictly to 01-PRODUCT-REQUIREMENTS.md and USER-FLOWS.md.
  */
 contract DogeCommitEscrow is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -28,7 +29,8 @@ contract DogeCommitEscrow is ReentrancyGuard {
         Submitted,          // Deliverable evidence submitted by contributor
         Approved,           // Client approved submission; payment released
         Disputed,           // Client disputed submission; funds locked
-        Resolved            // Dispute resolved via mutual authorization
+        ResolvedReleased,   // Dispute resolved; payment released to contributor
+        ResolvedRefunded    // Dispute resolved; payment refunded to client
     }
 
     enum ResolutionOutcome {
@@ -220,7 +222,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     // --- Core Functions ---
 
     /**
-     * @notice Creates a new project agreement with milestone definitions.
+     * @notice Creates a new project agreement with milestone definitions. (Flow B)
      * @param contributor Address of the designated contributor.
      * @param title Project title.
      * @param description Project description.
@@ -290,7 +292,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Deposits the exact required amount of DOGE into the escrow contract.
+     * @notice Deposits the exact required amount of DOGE into the escrow contract. (Flow D)
      *         The client must have approved the contract to spend the exact totalAmount.
      * @param projectId ID of the project to fund.
      */
@@ -307,7 +309,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
 
         emit ProjectFunded(projectId, msg.sender, project.totalAmount);
 
-        // If contributor has already accepted, activate the project
+        // If contributor has already accepted, activate the project (Flow E)
         if (project.isAccepted) {
             project.status = ProjectStatus.Active;
             emit ProjectActivated(projectId);
@@ -315,7 +317,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Allows designated contributor to explicitly accept the agreement.
+     * @notice Allows designated contributor to explicitly accept the agreement. (Flow C)
      * @param projectId ID of the project to accept.
      */
     function acceptProject(uint256 projectId) external onlyContributor(projectId) {
@@ -328,7 +330,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
 
         emit ProjectAccepted(projectId, msg.sender);
 
-        // If client has already funded, activate the project
+        // If client has already funded, activate the project (Flow E)
         if (project.isFunded) {
             project.status = ProjectStatus.Active;
             emit ProjectActivated(projectId);
@@ -336,7 +338,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Allows client to cancel project and withdraw deposited funds before activation.
+     * @notice Allows client to cancel project and withdraw deposited funds before activation. (Flow F)
      * @param projectId ID of the project to cancel.
      */
     function cancelProject(uint256 projectId) external nonReentrant onlyClient(projectId) {
@@ -359,7 +361,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Contributor submits deliverable evidence for an active milestone.
+     * @notice Contributor submits deliverable evidence for an active milestone. (Flow G)
      * @param projectId ID of the project.
      * @param milestoneIndex Index of the milestone.
      * @param evidenceUrl URL pointing to the milestone deliverable/evidence.
@@ -394,7 +396,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Client approves a submitted milestone, releasing payment to contributor.
+     * @notice Client approves a submitted milestone, releasing payment to contributor. (Flow H)
      * @param projectId ID of the project.
      * @param milestoneIndex Index of the milestone to approve.
      */
@@ -426,7 +428,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Client disputes a submitted milestone. Freezes milestone funds.
+     * @notice Client disputes a submitted milestone. Freezes milestone funds. (Flow I)
      * @param projectId ID of the project.
      * @param milestoneIndex Index of the milestone to dispute.
      * @param reason Description/reason for the dispute.
@@ -451,7 +453,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Propose a resolution outcome for a disputed milestone.
+     * @notice Propose a resolution outcome for a disputed milestone. (Flow J Option 1)
      * @param projectId ID of the project.
      * @param milestoneIndex Index of the disputed milestone.
      * @param outcome Desired outcome (ReleaseToContributor or RefundToClient).
@@ -476,7 +478,7 @@ contract DogeCommitEscrow is ReentrancyGuard {
     }
 
     /**
-     * @notice Jointly resolve a disputed milestone.
+     * @notice Jointly resolve a disputed milestone. (Flow J)
      *         Requires either:
      *         1) Direct concession (Client authorizing ReleaseToContributor, OR Contributor authorizing RefundToClient)
      *         2) Confirmation of the counterpart's active proposal
@@ -509,18 +511,19 @@ contract DogeCommitEscrow is ReentrancyGuard {
             revert ResolutionNotAgreed();
         }
 
-        // Checks-Effects-Interactions
-        milestone.status = MilestoneStatus.Resolved;
-        milestone.proposedOutcome = outcome;
-
+        // Checks-Effects-Interactions: distinguish ResolvedReleased vs ResolvedRefunded
         address recipient;
         if (outcome == ResolutionOutcome.ReleaseToContributor) {
+            milestone.status = MilestoneStatus.ResolvedReleased;
             recipient = project.contributor;
             project.releasedAmount += milestone.amount;
         } else {
+            milestone.status = MilestoneStatus.ResolvedRefunded;
             recipient = project.client;
             project.refundedAmount += milestone.amount;
         }
+
+        milestone.proposedOutcome = outcome;
 
         dogeToken.safeTransfer(recipient, milestone.amount);
 
@@ -543,7 +546,9 @@ contract DogeCommitEscrow is ReentrancyGuard {
 
         for (uint256 i = 0; i < count; i++) {
             MilestoneStatus s = projectMilestones[projectId][i].status;
-            if (s != MilestoneStatus.Approved && s != MilestoneStatus.Resolved) {
+            if (s != MilestoneStatus.Approved &&
+                s != MilestoneStatus.ResolvedReleased &&
+                s != MilestoneStatus.ResolvedRefunded) {
                 return; // Some milestones are still pending, submitted, or disputed
             }
         }
