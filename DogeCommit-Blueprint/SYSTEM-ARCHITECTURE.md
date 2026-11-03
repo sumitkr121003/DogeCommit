@@ -14,7 +14,7 @@ DogeCommit is a fully decentralized, milestone-based escrow application designed
 
 The system operates as a **two-tier decentralized application (dApp)**:
 1. **Client-Side Single-Page Application (SPA):** A pure frontend interface executing in the user's browser, responsible for wallet interactions, user experience, input validation, and reading blockchain state directly via JSON-RPC.
-2. **Onchain Smart Contract Layer:** Autonomous, immutable smart contracts deployed on DogeOS Chikyū Testnet that hold custody of native DOGE tokens, enforce agreement terms, manage milestone state transitions, and execute settlement.
+2. **Onchain Smart Contract Layer:** Autonomous smart contracts deployed on DogeOS Chikyū Testnet that contain no administrative upgrade mechanisms or owner backdoors according to the approved contract specification, holding custody of native DOGE tokens, enforcing agreement terms, managing milestone state transitions, and executing settlement.
 
 There is **no centralized web server, database, or intermediary API** required for core operations. The DogeOS blockchain and the `DogeCommitEscrow` smart contract serve as the definitive, single source of truth for all project states, payment custody, milestone progress, and financial settlements.
 
@@ -26,7 +26,7 @@ There is **no centralized web server, database, or intermediary API** required f
 2. **True Native Asset Custody:** DOGE is the actual settlement asset via its canonical DogeOS ERC-20 precompiled interface (`0x530000000000000000000000000000000000d09e`). No intermediate wrapped mock tokens or synthetic assets are used.
 3. **Zero-Custody Client Architecture:** Private keys and seed phrases remain strictly within the user's external wallet (e.g., MetaMask, Rabby). The frontend never accesses, handles, transmits, or stores user credentials.
 4. **Exact Approval Standard:** Token approvals are strictly limited to the exact project amount (`totalAmount`), eliminating systemic risks associated with unlimited (`type(uint256).max`) token allowances.
-5. **Decoupled Asynchronous Activation:** Project funding and contributor acceptance are architecturally decoupled. Activation occurs deterministically if and only if both prerequisites are fulfilled, regardless of execution order.
+5. **Decoupled Asynchronous Activation (No Background Service):** Project funding and contributor acceptance are architecturally decoupled and can occur in either sequence. Activation occurs synchronously onchain within whichever transaction fulfills the second condition (`isFunded && isAccepted`). There is no background keeper service, cron job, or offchain daemon responsible for activation.
 6. **Bilateral Dispute Settlement:** Fund release under dispute requires explicit bilateral consensus (via proposal and counterpart confirmation) or unilateral direct concession to the counterparty. Unilateral self-allocation of disputed funds is cryptographically prevented.
 7. **Minimalist Offchain Footprint:** Storage overhead is pushed to standard event logs (e.g., dispute reasoning) and external references (deliverable URLs and content hashes), keeping onchain execution fast and gas-efficient.
 
@@ -87,8 +87,8 @@ flowchart TD
   - Validate input bounds client-side prior to transaction broadcast (e.g., enforcing $1 \le \text{milestones} \le 25$).
   - Calculate accurate sums for total project funding.
   - Facilitate network switching to DogeOS Chikyū Testnet (`6281971`).
-  - Read onchain contract state via multicall/read calls and reconstruct dynamic project status.
-  - Query and display historical event logs (e.g., `MilestoneDisputed` reasons).
+  - Read onchain contract state via optional multicall where available, with a mandatory individual `eth_call` fallback if Multicall3 is absent.
+  - Query and display historical event logs (e.g., `MilestoneDisputed` reasons) using configurable block windows with adaptive retry.
 
 ### 4.2 Wallet Integration (EIP-1193)
 - **Supported Providers:** Injected Web3 providers compliant with EIP-1193 (MetaMask, Rabby, Coinbase Wallet, etc.).
@@ -101,12 +101,13 @@ flowchart TD
 ### 4.3 Smart Contract (`DogeCommitEscrow.sol`)
 - **Runtime:** EVM-compatible bytecode deployed on DogeOS Chikyū Testnet.
 - **Responsibilities:**
-  - Enforce immutable project rules, roles, amounts, and deadlines.
+  - Enforce onchain project rules, participant roles, payment allocations, and deadlines.
+  - Provide trust-minimized escrow with zero owner keys, zero administrative roles, and no upgradeable proxy patterns according to the approved contract specification (deployment immutability itself remains unverified until verified onchain).
   - Hold custody of deposited DOGE tokens.
   - Enforce exact token transfers using OpenZeppelin `SafeERC20`.
   - Execute Checks-Effects-Interactions (CEI) to eliminate reentrancy vulnerabilities.
-  - Manage milestone state progression: `Pending` $\rightarrow$ `Submitted` $\rightarrow$ `Approved` / `Disputed` $\rightarrow$ `Resolved`.
-  - Automatically evaluate project completion criteria.
+  - Manage milestone state progression: `Pending` $\rightarrow$ `Submitted` $\rightarrow$ `Approved` / `Disputed` $\rightarrow$ `ResolvedReleased` / `ResolvedRefunded`.
+  - Automatically evaluate project completion criteria within settlement transactions.
 
 ### 4.4 DogeOS Chikyū Testnet
 - **Network Specification:** High-throughput, EVM-compatible Layer 2 roll-up network settling to Dogecoin.
@@ -142,7 +143,8 @@ flowchart TD
   - Filter logs emitted by `DogeCommitEscrow` matching topic signatures.
   - Extract indexed topics (`projectId`, `milestoneIndex`, `client`, `contributor`).
   - Decode non-indexed data fields (specifically the dispute `reason` string from `MilestoneDisputed`).
-  - Handle RPC block-range query limits through chunked range requests.
+  - Use a configurable query block window (e.g. `DEFAULT_LOG_BLOCK_SPAN = 5000`, marked explicitly as unverified against DogeOS RPC limits until tested).
+  - Execute dynamic fallback by halving block ranges (e.g. 5,000 $\rightarrow$ 2,500 $\rightarrow$ 1,000 $\rightarrow$ 500) if the RPC rejects a query due to range limits.
 
 ### 4.8 Evidence Reference Handling
 - **Scope:** External deliverables referenced by contributors.
@@ -182,7 +184,9 @@ The application communicates exclusively via standard Web3 protocols:
 
 ## 6. Project Creation and Funding Sequence
 
-Funding can occur before or after contributor acceptance. Below is the primary flow where the client creates and funds the agreement first.
+Funding and contributor acceptance are completely independent and may happen in either order. Below is the sequence where the client creates and funds the agreement first.
+
+> **Synchronous Onchain Activation Principle:** Project activation is executed synchronously within whichever onchain transaction satisfies the second prerequisite (`isFunded && isAccepted`). There is no background activation service, keeper bot, or offchain daemon. If the contributor has already accepted prior to client funding, `fundProject()` itself executes the state transition to `Active` and emits `ProjectActivated`.
 
 ```mermaid
 sequenceDiagram
@@ -225,6 +229,8 @@ sequenceDiagram
 ---
 
 ## 7. Contributor Acceptance and Project Activation Sequence
+
+Below is the sequence where the contributor accepts an existing agreement. If the client has already funded the project, this transaction directly executes the activation logic synchronously onchain within `acceptProject()`—no external keeper or background daemon is involved.
 
 ```mermaid
 sequenceDiagram
@@ -389,13 +395,16 @@ Because DogeCommit has no central backend, the frontend maintains a reactive sta
 1. **Initial Mount:**
    - Detect wallet connection and verify chain ID (`6281971`).
    - Query user project IDs via `escrow.getUserProjects(userAddress)`.
-   - Batch-fetch project headers via `escrow.getProject(id)`.
-   - Batch-fetch milestones via `escrow.getMilestones(id)`.
+   - **Contract Read Strategy (Optional Multicall with Standard Fallback):**
+     - *Primary Path (Optional Multicall):* If a canonical Multicall3 contract is deployed and verified on DogeOS Chikyū Testnet, the frontend may batch-read `getProject(id)` and `getMilestones(id)` across active projects in a single RPC round-trip.
+     - *Standard Individual-Read Fallback:* Multicall is strictly optional. If Multicall3 is unavailable or encounters RPC errors, the client falls back to executing standard individual `eth_call` queries for each project (`getProject(id)`) and its milestone set (`getMilestones(id)`), executing requests in controlled parallel batches.
 2. **Post-Transaction Invalidation:**
    - On transaction broadcast: mark local UI state as "pending confirmation" with transaction hash linked to DogeOS L2Scan.
-   - On transaction receipt (`receipt.status === 1`): trigger an immediate re-fetch of `getProject(id)` and `getMilestones(id)`.
+   - On transaction receipt (`receipt.status === 1`): trigger an immediate re-fetch of `getProject(id)` and `getMilestones(id)` using individual reads (or multicall if enabled).
 3. **Background Polling:**
    - Poll current block number and project data every 10–15 seconds to detect counterparty state transitions (e.g. contributor submitting evidence while client has the tab open).
+4. **Synchronous Activation Verification:**
+   - Note that project activation occurs strictly within the transaction that fulfills the second condition (`isFunded && isAccepted`). The frontend never waits for an external background service; reading the contract state immediately following receipt confirmation reflects the `Active` status.
 
 ### 11.2 Derived Frontend States
 The frontend derives user-friendly statuses from the raw contract variables:
@@ -413,7 +422,7 @@ The frontend derives user-friendly statuses from the raw contract variables:
 | Data Element | Layer / Location | Storage Medium | Mutability | Authoritative Source |
 |---|---|---|---|---|
 | **Project Financial State** | Onchain | `Project` struct (contract storage) | Mutable via contract logic | Smart Contract |
-| **Milestone Allocations & Deadlines** | Onchain | `Milestone` struct (contract storage) | Immutable post-creation | Smart Contract |
+| **Milestone Allocations & Deadlines** | Onchain | `Milestone` struct (contract storage) | Fixed post-creation (no update functions) | Smart Contract |
 | **Milestone Status** | Onchain | `MilestoneStatus` enum (storage) | State-machine transitions | Smart Contract |
 | **Deliverable URLs & Hashes** | Onchain | `Milestone` struct strings | Written once per milestone | Smart Contract |
 | **DOGE Custody Balances** | Onchain | DOGE ERC-20 contract balance | Updated on fund/release/refund | DOGE ERC-20 Precompile |
@@ -447,13 +456,22 @@ event MilestoneDisputed(
 3. The event data is decoded to extract the `reason` string and displayed in the dispute panel.
 
 ### 13.2 Technical Limitations & Fallback Strategy
-- **RPC Query Range Constraints:** Public RPC nodes on Layer 2 networks typically limit `eth_getLogs` queries to a maximum block span (e.g. 5,000–10,000 blocks).
-- **Log Pruning on Testnets:** If the public testnet RPC node is pruned or does not maintain archive logs from project inception, historical dispute logs may return empty.
-- **Graceful Fallback UI:**
-  - If the event log query returns a valid reason, the UI displays the reason in the dispute card.
-  - If the event query times out or fails to return logs, the UI gracefully displays:  
-    `"Milestone disputed onchain. (Detailed dispute reason unavailable from historical RPC logs; refer to DogeOS L2Scan for tx details)."`
-  - The lack of an event log **never blocks** the mutual resolution or direct concession workflow, as dispute resolution functions depend solely on contract storage states.
+- **RPC Query Range Constraints & Configurable Window:**
+  - Public RPC nodes on Layer 2 networks typically impose strict block span limits on `eth_getLogs`.
+  - The frontend query window is configurable via client configuration or environment variable (e.g., `VITE_LOG_BLOCK_SPAN=5000`).
+  - **Explicit Unverified Status:** This initial default of 5,000 blocks is **strictly unverified** until live range-testing against `https://rpc.testnet.dogeos.com/` is completed.
+- **Smaller-Range Adaptive Retry Mechanism:**
+  - If an `eth_getLogs` request fails with an RPC error indicating the requested block span exceeds the node limit (e.g., error code `-32000` or messages matching `block range too large`, `exceeds maximum`, `query returned more than`), the frontend query engine intercepts the error and executes an adaptive retry loop:
+    1. Halve the query block window (e.g., 5,000 $\rightarrow$ 2,500 $\rightarrow$ 1,000 $\rightarrow$ 500 $\rightarrow$ 100 blocks).
+    2. Divide the requested range into smaller chunked queries executed sequentially or in rate-limited batches.
+    3. Aggregate retrieved logs from successful chunks.
+- **Log Pruning on Testnets & Graceful Fallback:**
+  - If the public testnet RPC node is pruned or does not maintain archive event logs from the project creation block, historical dispute logs may return empty or error.
+  - **Graceful Fallback UI:**
+    - If the event log query returns a valid reason, the UI displays the reason in the dispute card.
+    - If the event query times out, exhausts retries, or returns empty due to node log pruning, the UI gracefully displays:  
+      `"Milestone disputed onchain. (Detailed dispute reason unavailable from historical RPC logs; refer to DogeOS L2Scan for tx details)."`
+    - The lack of an event log **never blocks** the mutual resolution or direct concession workflow, as dispute resolution functions depend solely on contract storage states.
 
 ---
 
@@ -473,13 +491,13 @@ event MilestoneDisputed(
       ├── Checks-Effects-Interactions (CEI)
       ├── ReentrancyGuard
       ├── Exact Token Approval & SafeERC20
-      └── Zero Owner Backdoors (Immutable)
+      └── Zero Owner Backdoors (No Admin / Upgrade Functions)
 ```
 
 ### Core Security Guarantees
 1. **Checks-Effects-Interactions (CEI):** All state updates (marking milestones approved, updating released amounts) occur prior to invoking external token transfers.
 2. **Reentrancy Immunity:** All functions executing token disbursements (`fundProject`, `cancelProject`, `approveMilestone`, `resolveDispute`) are protected by OpenZeppelin's `nonReentrant` modifier.
-3. **Immutability & Zero Admin Privilege:** The contract has no owner, admin keys, pause mechanisms, or upgradable proxies. Contract logic cannot be altered, and funds cannot be drained by an administrative account.
+3. **Absence of Admin and Upgrade Functionality:** In accordance with the approved contract specification, `DogeCommitEscrow` contains no owner or administrator addresses, no pause mechanisms, no fund-extraction backdoors, and no proxy or upgradeability patterns. Deployment immutability itself remains unverified until verified onchain; however, the contract bytecode contains no administrative controls to alter project rules or seize escrowed capital.
 4. **Anti-Seizure Enforcement:** The smart contract cryptographically enforces that disputed funds can only be released to the counterparty (via direct concession) or transferred under verified mutual agreement.
 
 ---
@@ -544,6 +562,7 @@ flowchart LR
 | Architecture Decision | Options Considered | Selected Approach | Trade-off / Justification |
 |---|---|---|---|
 | **Backend Architecture** | Centralized Node/PostgreSQL vs. Pure Client-Side Web3 | **Pure Client-Side Web3** | Eliminates centralized points of failure, hosting costs, and database synchronization bugs; trade-off is reliance on public RPC log indexing. |
+| **Contract State Reads** | Mandatory Multicall vs. Standard Individual Reads | **Optional Multicall with Individual Fallback** | Optimizes latency when Multicall3 is present, but guarantees robust operation via individual `eth_call` fallback if absent on DogeOS testnet. |
 | **Dispute Reason Persistence** | `SSTORE` in contract struct vs. Event Emission | **Event Emission (`MilestoneDisputed`)** | Saves significant gas on dispute creation; trade-off is dependency on RPC log retention for historical display. |
 | **Milestone Ceiling** | Unbounded dynamic array vs. Fixed upper bound | **`MAX_MILESTONES = 25`** | Guarantees that milestone iteration during `_checkProjectCompletion` never exceeds block gas limits; trade-off is disallowing agreements with >25 milestones. |
 | **Settlement Currency** | Synthetic wrapped token vs. Canonical DOGE ERC-20 | **Canonical DOGE ERC-20 (`0x5300...d09e`)** | Real value transfer using native DogeOS token; adheres strictly to the primary product mandate. |
@@ -555,6 +574,7 @@ flowchart LR
 
 The following capabilities are deliberately and strictly **excluded** from the DogeCommit architecture:
 - **No Centralized Relayers or Custodians:** No gasless meta-transactions or centralized transaction relayers.
+- **No Background Activation Service:** No external cron jobs, bots, or keeper daemons. Activation is triggered synchronously within the onchain transaction that fulfills the second requirement.
 - **No External Arbitrators or DAOs:** No third-party arbitration or automated dispute juries.
 - **No Automated Deadline Penalties:** Milestone deadlines do not trigger automatic balance distributions or cancellations.
 - **No Deliverable Resubmission:** Once disputed, a milestone cannot be reopened or resubmitted in the contract.
@@ -565,14 +585,20 @@ The following capabilities are deliberately and strictly **excluded** from the D
 
 ## 19. Technical Verification Checklist & Open Questions
 
-The following technical environment parameters should be monitored and verified during testnet operations:
+The following technical environment parameters must be tested and verified prior to frontend implementation:
 
-1. **DogeOS RPC `eth_getLogs` Block Limit:**
-   - *Status:* Functioning on basic tests.
-   - *Verification Item:* Determine the exact maximum block range supported by `https://rpc.testnet.dogeos.com/` for single `eth_getLogs` requests (e.g., whether it limits queries to 10,000 blocks or allows unrestricted range). The frontend query helper should implement a conservative 5,000-block chunking strategy.
-2. **DogeOS Gas Price Volatility & Floor:**
-   - *Status:* Testnet gas is currently minimal.
-   - *Verification Item:* Ensure the frontend Viem/Wagmi client accurately fetches `maxFeePerGas` and `maxPriorityFeePerGas` from DogeOS to avoid stuck transactions.
-3. **RPC Rate Limiting:**
-   - *Status:* Verified responsive for standard development workflows.
-   - *Verification Item:* Check whether public RPC rate-limiting occurs under rapid successive `eth_call` multicall queries, ensuring the frontend bundles view calls appropriately.
+1. **DogeOS Gas Fee Mechanism (EIP-1559 vs Legacy Type-0):**
+   - *Status:* Unverified.
+   - *Requirement:* Treat EIP-1559 fee fields (`maxFeePerGas`, `maxPriorityFeePerGas`) as strictly conditional on DogeOS network support.
+   - *Verification Item:* Query the DogeOS RPC (`eth_getBlockByNumber("latest")`) to check for the presence of `baseFeePerGas`. If unsupported, the frontend Viem/Wagmi configuration must be configured to use legacy Type-0 transactions (`gasPrice`) to prevent transaction rejection.
+2. **DogeOS RPC `eth_getLogs` Block Limit & Adaptive Fallback:**
+   - *Status:* Unverified.
+   - *Requirement:* The initial query window (`DEFAULT_LOG_BLOCK_SPAN = 5000`) is unverified against DogeOS RPC constraints.
+   - *Verification Item:* Test live block span limits on `https://rpc.testnet.dogeos.com/`. Verify that the frontend's adaptive halving retry loop (5,000 $\rightarrow$ 2,500 $\rightarrow$ 1,000 $\rightarrow$ 500) successfully retrieves `MilestoneDisputed` events across historical blocks without tripping node limit errors.
+3. **Multicall3 Deployment Verification:**
+   - *Status:* Unverified.
+   - *Requirement:* Multicall is optional; verify whether the standard Multicall3 contract (`0xcA11bde05977b3631167028862bE2a173976CA11`) exists on DogeOS Chikyū Testnet.
+   - *Verification Item:* If Multicall3 is absent, ensure the frontend executes standard individual `eth_call` reads for `getUserProjects`, `getProject`, and `getMilestones` without failure.
+4. **RPC Rate Limiting & Batching:**
+   - *Status:* Verified responsive for single queries.
+   - *Verification Item:* Check whether public RPC rate-limiting occurs under rapid successive queries, ensuring the frontend request throttler applies backoff where appropriate.
