@@ -39,7 +39,7 @@ The contributor can:
 
 - Connect a DogeOS-compatible wallet.
 - View assigned project details.
-- Accept or decline a project.
+- Explicitly accept an assigned project onchain (or choose not to accept).
 - Submit milestone evidence.
 - Participate in dispute resolution.
 - Receive DOGE after milestone approval or an agreed dispute outcome.
@@ -94,7 +94,7 @@ The application must never request or store the user's private key or seed phras
 3. Client enters the project title.
 4. Client enters a project description.
 5. Client enters the contributor's wallet address.
-6. Client defines one or more milestones.
+6. Client defines one or more milestones (up to a maximum of 25).
 7. For every milestone, the client provides:
    - Milestone title.
    - Description of expected work.
@@ -112,7 +112,8 @@ The application must never request or store the user's private key or seed phras
 
 - Contributor address must be valid and non-zero.
 - Client and contributor cannot be the same address.
-- At least one milestone is required.
+- At least one milestone is required, and no more than 25 milestones are permitted (`1 <= milestoneCount <= 25`).
+- Any project creation attempt with 26 or more milestones must be rejected.
 - Every milestone amount must be greater than zero.
 - Deadline must be valid and in the future at creation.
 - Total milestone amount must be calculated correctly.
@@ -127,7 +128,7 @@ The milestone amounts and agreed project terms must not be silently changed afte
 2. Contributor opens the assigned project.
 3. Contributor reviews the project description.
 4. Contributor reviews every milestone, amount and deadline.
-5. Contributor chooses Accept Project.
+5. If agreeable, Contributor chooses Accept Project (no explicit onchain decline function exists; if rejected or ignored, the contributor simply does not accept).
 6. Contributor confirms the transaction through their wallet.
 7. Smart contract records acceptance.
 8. Application checks whether the project is already funded.
@@ -142,7 +143,7 @@ The milestone amounts and agreed project terms must not be silently changed afte
 
 **Expected result:** Contributor acceptance is permanently recorded on-chain.
 
-The contributor must not be able to accept the same project twice or accept a project assigned to another wallet.
+The contributor must not be able to accept the same project twice or accept a project assigned to another wallet. If the contributor decides not to accept, no onchain action is required from the contributor; the project remains unaccepted until the client cancels it.
 
 ## 7. Flow D — Client Funding
 
@@ -193,7 +194,7 @@ Once Active, the project cannot be cancelled through the pre-activation cancella
 
 **Actor:** Client
 
-Cancellation protects the client if the contributor never accepts or the project never becomes active.
+Cancellation protects the client if the contributor never accepts, declines offchain, or the project never becomes active.
 
 1. Client opens the project.
 2. Client selects Cancel Project.
@@ -268,7 +269,7 @@ The MVP records evidence references. It does not independently verify whether su
 3. Client selects Raise Dispute.
 4. Client provides a dispute reason.
 5. Client confirms the transaction.
-6. Smart contract changes the milestone state to Disputed.
+6. Smart contract changes the milestone state to Disputed and emits the dispute reason in the `MilestoneDisputed` event.
 7. The disputed milestone's payment remains locked in escrow.
 8. Application displays the dispute status to both parties.
 
@@ -279,8 +280,10 @@ The MVP records evidence references. It does not independently verify whether su
 - The disputed amount cannot be released through normal approval.
 - Other independent milestones may continue through their normal workflow.
 - Neither party can unilaterally take the disputed amount.
+- **Dispute Reason Persistence:** Dispute reasons are emitted as event data (`MilestoneDisputed`) rather than stored in contract storage. The frontend or indexer reads dispute reasons from transaction/event logs. If historical RPC logs are unavailable, historical dispute reasons cannot be recovered directly from contract state.
+- **Evidence Resubmission Excluded:** Resubmitting evidence or reopening a disputed milestone is excluded from the MVP. Once disputed, the milestone stays locked until a permitted bilateral resolution or direct concession settles it.
 
-Dispute reasons and supporting evidence should be available to both parties.
+Dispute reasons and supporting evidence should be available to both parties through the application interface.
 
 ## 13. Flow J — Mutual Dispute Resolution
 
@@ -406,6 +409,10 @@ The following behaviours are intentionally excluded:
 - Partial milestone payments.
 - Milestone amount modification after project creation.
 - Automatic contributor replacement.
+- Explicit onchain `declineProject()` function (contributor simply does not accept; client cancels pre-activation).
+- Evidence resubmission or reopening of disputed milestones.
+- Storing dispute reason strings in contract storage (emitted via event logs only).
+- Creating projects with more than 25 milestones (`MAX_MILESTONES = 25`).
 
 Milestone deadlines are informational in the MVP. They do not automatically release, refund, or cancel funds.
 
@@ -413,14 +420,14 @@ Milestone deadlines are informational in the MVP. They do not automatically rele
 
 The user flows are considered correctly implemented when:
 
-1. A client can create a project with multiple milestones.
-2. The assigned contributor can accept the project.
+1. A client can create a project with multiple milestones (between 1 and 25 milestones; 26 or more rejected).
+2. The assigned contributor can accept the project onchain (or leave it unaccepted without an explicit onchain decline transaction).
 3. Client funding and contributor acceptance work in either order.
 4. Project activation happens only when both conditions are satisfied.
 5. A client can cancel before activation and recover any deposited amount.
 6. A contributor can submit milestone evidence.
 7. A client can approve a submitted milestone and release the exact amount.
-8. A client can dispute a submitted milestone.
+8. A client can dispute a submitted milestone (with dispute reason emitted via event; evidence resubmission excluded).
 9. Disputed funds remain locked until an allowed resolution occurs.
 10. Dispute resolution requires agreement or direct concession by the party giving up the funds.
 11. Every milestone is settled at most once.

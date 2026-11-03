@@ -58,7 +58,7 @@ The contract interacts with DOGE via OpenZeppelin's `IERC20` and `SafeERC20` wra
 | Role | Address Definition | Capabilities & Permissions |
 |---|---|---|
 | **Client** | `project.client` (the creator of the project) | - Call `fundProject()`<br>- Call `cancelProject()` (pre-activation only)<br>- Call `approveMilestone()`<br>- Call `disputeMilestone()`<br>- Call `proposeDisputeResolution()`<br>- Call `resolveDispute()` (conceding release or confirming refund) |
-| **Contributor** | `project.contributor` (assigned address) | - Call `acceptProject()`<br>- Call `submitMilestone()`<br>- Call `proposeDisputeResolution()`<br>- Call `resolveDispute()` (conceding refund or confirming release) |
+| **Contributor** | `project.contributor` (assigned address) | - Call `acceptProject()` (or choose not to accept; no onchain decline function exists)<br>- Call `submitMilestone()`<br>- Call `proposeDisputeResolution()`<br>- Call `resolveDispute()` (conceding refund or confirming release) |
 | **Participant** | Either `client` or `contributor` | - Participate in dispute resolution proposals and executions |
 | **Third Party / Public** | Any other address | - Call read-only view functions (`getProject`, `getMilestone`, `getMilestones`, `getUserProjects`, `projectCount`)<br>- Call `createProject` (acting as client for a new project) |
 | **Contract Admin** | None | **Zero Admin Keys.** The contract is immutable, non-upgradeable, and contains no backdoors or owner drain functions. |
@@ -77,6 +77,12 @@ enum ProjectStatus {
 }
 ```
 
+### Project Constants & State Variables
+```solidity
+/// @notice Maximum number of milestones allowed per project to ensure gas safety
+uint256 public constant MAX_MILESTONES = 25;
+```
+
 ### `Project` Struct
 ```solidity
 struct Project {
@@ -91,7 +97,7 @@ struct Project {
     bool isFunded;             // True once client deposits totalAmount
     bool isAccepted;           // True once designated contributor accepts agreement
     ProjectStatus status;      // Current state of the project
-    uint256 milestoneCount;    // Number of milestones defined in project
+    uint256 milestoneCount;    // Number of milestones defined in project (1 to 25)
 }
 ```
 
@@ -202,7 +208,7 @@ stateDiagram-v2
 1. **`Pending`:** Contributor is working on the milestone. Submissions are only accepted while the project status is `Active`.
 2. **`Submitted`:** Evidence has been recorded onchain. The client can either approve or dispute.
 3. **`Approved`:** Terminal milestone state. Payment was successfully transferred to contributor.
-4. **`Disputed`:** Milestone funds are frozen. The normal approval function is blocked.
+4. **`Disputed`:** Milestone funds are frozen. The normal approval function is blocked. Evidence resubmission and milestone reopening are excluded from the MVP; disputed funds stay locked until an allowed resolution or direct concession settles the milestone.
 5. **`ResolvedReleased`:** Terminal milestone state. Dispute was resolved in favor of the contributor, and payment was released.
 6. **`ResolvedRefunded`:** Terminal milestone state. Dispute was resolved in favor of the client, and payment was refunded.
 
@@ -225,6 +231,7 @@ function createProject(
   - `contributor != address(0)` (reverts with `InvalidContributorAddress`).
   - `msg.sender != contributor` (reverts with `ClientEqualsContributor`).
   - `milestones.length > 0` (reverts with `EmptyMilestones`).
+  - `milestones.length <= MAX_MILESTONES` (reverts with `TooManyMilestones` if `milestones.length > 25`).
   - For each milestone:
     - `milestones[i].amount > 0` (reverts with `InvalidMilestoneAmount`).
     - `milestones[i].deadline > block.timestamp` (reverts with `InvalidMilestoneDeadline`).
@@ -247,7 +254,7 @@ function fundProject(uint256 projectId) external nonReentrant onlyClient(project
 ```solidity
 function acceptProject(uint256 projectId) external onlyContributor(projectId);
 ```
-- **Description:** Records explicit acceptance of project terms by the designated contributor.
+- **Description:** Records explicit acceptance of project terms by the designated contributor. If the contributor does not agree, no onchain action is required (there is no explicit `declineProject()` function); the project remains in `Created` status until the client cancels it.
 - **Access Control:** `onlyContributor(projectId)`.
 - **Validations:**
   - `project.status == ProjectStatus.Created` (reverts with `InvalidProjectState`).
@@ -317,6 +324,8 @@ function disputeMilestone(
   - `milestoneIndex < project.milestoneCount` (reverts with `InvalidMilestoneIndex`).
   - `milestone.status == MilestoneStatus.Submitted` (reverts with `InvalidMilestoneState`).
 - **State Changes:** Sets `milestone.status = MilestoneStatus.Disputed`. Resets `milestone.proposedOutcome = ResolutionOutcome.None` and `milestone.proposedBy = address(0)`.
+- **Dispute Reason Persistence:** Emits `MilestoneDisputed(projectId, milestoneIndex, reason)`. The string `reason` is **not** written to contract storage. It must be indexed offchain or read from event logs. Limitation: If historical logs are purged or unavailable via RPC, dispute reasons cannot be retrieved directly from the contract state.
+- **Evidence Resubmission Excluded:** A disputed milestone cannot be reopened or resubmitted by the contributor; it remains frozen until settled via mutual dispute resolution or direct concession.
 - **Emits:** `MilestoneDisputed(projectId, milestoneIndex, reason)`.
 
 ### 9.8 `proposeDisputeResolution`
@@ -473,6 +482,7 @@ Gas-efficient custom errors replace legacy revert strings:
 | `InvalidContributorAddress` | Contributor address is zero |
 | `ClientEqualsContributor` | Client address matches contributor address |
 | `EmptyMilestones` | Milestones array length is 0 at creation |
+| `TooManyMilestones` | Milestones array length exceeds `MAX_MILESTONES` (25) at creation |
 | `InvalidMilestoneAmount` | Milestone amount is 0 |
 | `InvalidMilestoneDeadline` | Milestone deadline is in the past ($t \le \text{block.timestamp}$) at creation |
 | `ProjectDoesNotExist` | Project ID queried is 0 or greater than `projectCount` |
@@ -504,7 +514,7 @@ Partial funding is disallowed. The contract demands 100% of the project's `total
 
 ## 14. Pre-Activation Cancellation and Refunds
 
-1. **Purpose:** Protects clients from stranded capital if a contributor ghosts, declines, or fails to accept.
+1. **Purpose:** Protects clients from stranded capital if a contributor ghosts, chooses not to accept, or declines offchain. (There is no onchain `declineProject()` function).
 2. **Availability:** Accessible **only** while `project.status == ProjectStatus.Created`.
 3. **Refund Logic:**
    - If the client had funded the agreement prior to cancellation, the contract executes `safeTransfer(client, totalAmount)`.
@@ -517,6 +527,7 @@ Partial funding is disallowed. The contract demands 100% of the project's `total
 
 - **Submission Authority:** Restricted strictly to `project.contributor`.
 - **Milestone State:** Must be `MilestoneStatus.Pending`.
+- **No Resubmission After Dispute:** Once a milestone transitions to `Disputed`, calls to `submitMilestone` revert with `InvalidMilestoneState`. Evidence resubmission and milestone reopening are excluded from the MVP.
 - **Evidence Formatting:** Requires at least one non-empty reference string (`evidenceUrl` or `evidenceHash`).
   - `evidenceUrl`: Hyperlink to deliverable (e.g., GitHub PR, live deployment, documentation).
   - `evidenceHash`: Cryptographic fingerprint (e.g., IPFS CID, SHA-256 hash of deliverable bundle).
@@ -548,6 +559,8 @@ Partial funding is disallowed. The contract demands 100% of the project's `total
   - Normal approval is locked (reverts `InvalidMilestoneState`).
   - Milestone payment remains in the contract's custody.
   - Emits `MilestoneDisputed(projectId, milestoneIndex, reason)`.
+- **Dispute Reason Persistence:** Emitted via the `MilestoneDisputed` event; **not** stored as a string in contract storage. The frontend/indexer is expected to fetch dispute reasons from transaction receipt logs or event logs. If historical RPC logs are unavailable or purged, dispute reasons cannot be recovered directly from contract state.
+- **Evidence Resubmission Excluded:** Resubmitting evidence or reopening a disputed milestone is excluded from the MVP. Once disputed, the milestone stays locked until a permitted bilateral resolution or direct concession settles it.
 - **Independent Scoping:** Disputing milestone $k$ does not block submissions or approvals on other milestones $j \neq k$.
 
 ---
@@ -644,10 +657,12 @@ View functions do not restrict callers.
 
 | Scenario | System Reaction | Prevention / Handling Mechanism |
 |---|---|---|
-| **Contributor fails to accept** | Funds can be recovered | Client calls `cancelProject()`, receiving 100% refund. |
+| **Contributor fails to accept / declines** | Funds can be recovered | Contributor does not accept (no onchain decline needed); Client calls `cancelProject()`, receiving 100% refund. |
+| **Creation with >25 milestones** | Reverted | Guard `milestones.length > MAX_MILESTONES` reverts `TooManyMilestones`. |
 | **Client fails to fund** | Work does not begin | Project remains in `Created` state; contributor cannot submit evidence. |
 | **Milestone delivered after deadline** | Submission accepted | Recorded with timestamp; client decides whether to approve or dispute. |
-| **Client disputes milestone** | Funds frozen | Milestone locked; cannot be released via standard approval. |
+| **Client disputes milestone** | Funds frozen | Milestone locked; cannot be released via standard approval. Evidence resubmission is excluded. |
+| **Historical dispute reason retrieval** | Read from events | Emitted in `MilestoneDisputed` event; not stored onchain. Requires archive/event RPC indexing. |
 | **Parties cannot agree on dispute** | Funds remain locked | Contract holds funds indefinitely until one party concedes or confirms an agreement. |
 | **Reentrancy attack during release** | Reverted | Protected by `nonReentrant` modifier and CEI. |
 | **Empty evidence submitted** | Reverted | Guard `bytes(url).length == 0 && bytes(hash).length == 0` reverts `EmptyEvidence`. |
@@ -661,13 +676,15 @@ The following invariants must hold true across all contract states:
 
 1. **Conservation of Escrow Balance:**
    $$\text{IERC20}(\text{dogeToken}).\text{balanceOf}(\text{address}(\text{this})) \ge \sum_{p \in \text{Projects}} (\text{fundedAmount}_p - \text{releasedAmount}_p - \text{refundedAmount}_p)$$
-2. **No Double Payment:**
+2. **Milestone Count Boundaries:**
+   $$1 \le \text{project.milestoneCount} \le \text{MAX\_MILESTONES} \quad (\text{where } \text{MAX\_MILESTONES} = 25)$$
+3. **No Double Payment:**
    $$\forall i \in \text{Milestones}: \text{Count}(\text{Release}(i)) + \text{Count}(\text{Refund}(i)) \le 1$$
-3. **Settlement Cap:**
+4. **Settlement Cap:**
    $$\text{project.releasedAmount} + \text{project.refundedAmount} \le \text{project.totalAmount}$$
-4. **No Post-Activation Cancellation:**
+5. **No Post-Activation Cancellation:**
    $$\text{project.status} = \text{Active} \implies \text{cancelProject()} \text{ REVERTS}$$
-5. **Role Exclusivity:**
+6. **Role Exclusivity:**
    $$\text{project.client} \neq \text{project.contributor} \land \text{project.contributor} \neq \text{address}(0)$$
 
 ---
@@ -675,32 +692,45 @@ The following invariants must hold true across all contract states:
 ## 26. Smart Contract Acceptance Criteria
 
 1. Deployment passes with valid DOGE ERC-20 token address on DogeOS Chikyū Testnet.
-2. A client can create a project with multiple milestones with non-zero amounts.
-3. Funding and contributor acceptance can occur in either order; activation occurs only when both are complete.
-4. Client can cancel a pre-activation project and retrieve 100% of deposited DOGE.
-5. Contributor can submit milestone deliverables with URL and/or content hash.
-6. Client approval releases exact DOGE payment directly to the contributor.
-7. Client can dispute a milestone, locking funds in the contract.
-8. Disputed funds can only be unlocked via mutual agreement or direct concession.
-9. Contract strictly prevents unilateral seizure of disputed funds.
-10. Project completion occurs automatically when all milestones reach terminal settlement.
-11. 100% test pass rate across unit, edge case, and integration suites.
+2. A client can create a project with multiple milestones (1 to 25 milestones).
+3. Attempting to create a project with 0 milestones reverts with `EmptyMilestones`; attempting with 26 or more milestones reverts with `TooManyMilestones`.
+4. Automated tests verify project creation, milestone retrieval (`getMilestones`), and project completion (`_checkProjectCompletion`) at the maximum milestone count (25 milestones).
+5. Gas consumption is measured and documented for creation, retrieval, and completion at 25 milestones on DogeOS Chikyū Testnet.
+6. Funding and contributor acceptance can occur in either order; activation occurs only when both are complete.
+7. Client can cancel a pre-activation project and retrieve 100% of deposited DOGE if contributor declines or does not accept (no explicit onchain decline function exists).
+8. Contributor can submit milestone deliverables with URL and/or content hash.
+9. Client approval releases exact DOGE payment directly to the contributor.
+10. Client can dispute a milestone, locking funds in the contract.
+11. Dispute reasons are emitted via `MilestoneDisputed` event logs; storage in contract state is omitted.
+12. Evidence resubmission and milestone reopening are excluded; disputed milestones remain locked until an allowed resolution occurs.
+13. Disputed funds can only be unlocked via mutual agreement or direct concession.
+14. Contract strictly prevents unilateral seizure of disputed funds.
+15. Project completion occurs automatically when all milestones reach terminal settlement.
+16. 100% test pass rate across unit, edge case, and integration suites.
 
 ---
 
-## 27. Specification Analysis: Questions & Discrepancies
+## 27. Specification Reconciliation: Final MVP Decisions
 
-### Differences & Open Questions Identified
-1. **Explicit Contributor Rejection / Decline:**
-   - *Observation:* `USER-FLOWS.md` Section 2.2 states contributors can "Accept or decline a project", but neither the contract nor PRD defines a `declineProject()` function.
-   - *Current Implementation:* If a contributor declines offchain, they do not call `acceptProject()`. The client then cancels via `cancelProject()`.
-   - *Recommendation:* Consider adding `declineProject(uint256 projectId)` in a future revision to formally close unaccepted agreements onchain.
-2. **Dispute Reason Storage:**
-   - *Observation:* PRD and `USER-FLOWS.md` mention providing a dispute reason.
-   - *Current Implementation:* The reason is emitted in `MilestoneDisputed(projectId, milestoneIndex, reason)` event to optimize gas, but is not stored in the `Milestone` storage struct.
-3. **Resubmission After Dispute:**
-   - *Observation:* If a milestone is disputed because of minor defects, the parties might wish for the contributor to resubmit corrected evidence rather than executing a full refund or full release.
-   - *Current Implementation:* The MVP treats disputes as terminal until settled via `resolveDispute` (release or refund). Resubmission after a dispute is out of scope for the MVP.
-4. **Milestone Array Bound:**
-   - *Observation:* Dynamic memory allocation in `getMilestones()` and iteration in `_checkProjectCompletion()` iterate over `milestoneCount`.
-   - *Current Implementation:* Practical projects use 1–10 milestones. Adding a max limit (e.g. `MAX_MILESTONES = 25`) could be added in production to safeguard gas limits against adversarial client inputs.
+This specification reconciles the four finalized product and architectural decisions:
+
+### Decision 1: Contributor Rejection
+- **Resolution:** No explicit `declineProject()` function is implemented in the contract for the MVP.
+- **Workflow:** A designated contributor may choose not to accept the agreement. While the project is in `Created` status, the client retains the ability to invoke `cancelProject()` and recover 100% of deposited DOGE. All documents (`USER-FLOWS.md`, `PRODUCT-REQUIREMENTS.md`, `SMART-CONTRACT-SPEC.md`) are aligned on this behavior.
+
+### Decision 2: Dispute Reason Persistence
+- **Resolution:** Dispute reasons are emitted exclusively as event arguments in `MilestoneDisputed(projectId, milestoneIndex, reason)`. They are not stored as string variables in the contract's storage.
+- **Frontend / Indexer Dependency:** The user interface retrieves dispute reasons from transaction receipt logs or event indexers (`eth_getLogs`).
+- **Limitation:** If historical event logs are unavailable or purged by the RPC node, historical dispute reasons cannot be reconstructed directly from the smart contract state.
+
+### Decision 3: Evidence Resubmission
+- **Resolution:** Evidence resubmission, milestone reopening, and iterative dispute loops are strictly excluded from the MVP.
+- **Workflow:** Once a milestone transitions to `Disputed`, the funds remain locked until an authorized mutual resolution (`ReleaseToContributor` or `RefundToClient`) or a direct concession executes. The milestone cannot transition back to `Pending` or `Submitted`.
+
+### Decision 4: Maximum Milestones Boundary
+- **Resolution:** A contract constant `MAX_MILESTONES = 25` is introduced.
+- **Enforcement:**
+  - Creation requires at least 1 milestone (`EmptyMilestones`).
+  - Creation with $\le 25$ milestones is accepted.
+  - Creation with 26 or more milestones reverts with `TooManyMilestones()`.
+- **Testing & Gas Verification Requirement:** The test suite must test creation, retrieval (`getMilestones`), and project completion (`_checkProjectCompletion`) at the 25-milestone ceiling, with gas measurements logged for DogeOS Chikyū Testnet deployment.

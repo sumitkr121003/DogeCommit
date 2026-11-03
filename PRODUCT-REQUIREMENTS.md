@@ -102,7 +102,7 @@ The client must be able to define:
 - Deadline for each milestone.
 - Evidence or deliverable requirements.
 
-The total milestone amounts must equal the project funding amount.
+The total milestone amounts must equal the project funding amount. A project must define at least 1 milestone and at most 25 milestones (`1 <= milestoneCount <= 25`). Any attempt to create a project with 26 or more milestones must be rejected.
 
 ### 6.3 DOGE Funding
 
@@ -115,6 +115,7 @@ The total milestone amounts must equal the project funding amount.
 
 - The designated contributor can view the agreement.
 - The contributor must explicitly accept the agreement.
+- If the contributor decides not to accept, no explicit onchain decline action is needed; the project remains unaccepted and the client can cancel it while in Created status to recover deposited funds.
 - Only the designated contributor can submit milestone evidence.
 - The agreement must not be modified after acceptance and funding.
 
@@ -136,8 +137,10 @@ The total milestone amounts must equal the project funding amount.
 ### 6.7 Milestone Dispute
 
 - The client can dispute a submitted milestone.
+- The dispute reason is emitted in the `MilestoneDisputed` event rather than stored in contract storage.
 - Disputed funds must remain locked.
 - The contributor cannot withdraw disputed milestone funds.
+- Resubmitting evidence or reopening a disputed milestone is excluded from the MVP.
 - The interface must clearly identify disputed milestones.
 - The MVP will support an explicitly defined mutual resolution process.
 
@@ -188,17 +191,18 @@ Use exact token approvals rather than unlimited approvals.
 
 1. A project must have a valid client and contributor address.
 2. The client and contributor must be different addresses.
-3. Milestone amounts must be greater than zero.
-4. The sum of milestone amounts must equal the total project funding.
-5. The client must fund the project before work becomes active.
-6. The contributor must accept the agreement before submitting work.
-7. Only the assigned contributor can submit evidence.
-8. Only the client can approve or dispute a submitted milestone.
-9. A milestone can be released only once.
-10. A disputed milestone cannot be released through the normal approval process.
-11. A completed milestone cannot be paid again.
-12. Contract functions must validate the current project and milestone state before executing.
-13. A project must not allow changes to its agreed payment terms after activation.
+3. A project must have between 1 and 25 milestones (`MAX_MILESTONES = 25`). Creating 26 or more milestones must be rejected.
+4. Milestone amounts must be greater than zero.
+5. The sum of milestone amounts must equal the total project funding.
+6. The client must fund the project before work becomes active.
+7. The contributor must accept the agreement before submitting work.
+8. Only the assigned contributor can submit evidence.
+9. Only the client can approve or dispute a submitted milestone.
+10. A milestone can be released only once.
+11. A disputed milestone cannot be released through the normal approval process.
+12. A completed milestone cannot be paid again.
+13. Contract functions must validate the current project and milestone state before executing.
+14. A project must not allow changes to its agreed payment terms after activation.
 
 ## 9. Dispute and Resolution Rules
 
@@ -235,6 +239,10 @@ The following features are deliberately excluded from the MVP:
 - Streaming payments.
 - Mobile application.
 - Advanced analytics dashboards.
+- Explicit onchain `declineProject()` function (handled via contributor non-acceptance and client pre-activation cancellation).
+- Evidence resubmission or reopening of disputed milestones.
+- Storing dispute reason strings in contract storage (emitted via event logs only).
+- Creating projects with more than 25 milestones (`MAX_MILESTONES = 25`).
 
 These may be considered after the core escrow workflow is functional.
 
